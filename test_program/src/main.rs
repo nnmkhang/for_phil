@@ -12,8 +12,19 @@ use rustls::{OwnedTrustAnchor, RootCertStore};
 use rustls::ServerName;
 
 use rustls_platform_verifier::tls_config;
-use rustls::ClientConfig;
+use rustls_platform_verifier::verifier_for_platform;
+// use rustls::ClientConfig;
 const CLIENT: mio::Token = mio::Token(0);
+
+use rustls::{
+    client::ResolvesClientCert, sign::CertifiedKey, Certificate, ClientConfig, ClientConnection,
+    SignatureScheme, Stream,
+};
+
+use rustls_cng::{
+    signer::CngSigningKey,
+    store::{CertStore, CertStoreType},
+};
 
 /// This encapsulates the TCP-level connection, some connection
 /// state, and the underlying TLS-level session.
@@ -325,6 +336,67 @@ fn make_capi_config() -> Arc<rustls::ClientConfig> {
     Arc::new(config)
 }
 
+
+pub struct ClientCertResolver(CertStore, String);
+
+fn get_chain(store: &CertStore, name: &str) -> anyhow::Result<(Vec<Certificate>, CngSigningKey)> {
+    let contexts = store.find_by_subject_str(name)?;
+    let context = contexts
+        .first()
+        .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
+    let key = context.acquire_key()?;
+    let signing_key = CngSigningKey::new(key)?;
+    let chain = context
+        .as_chain_der()?
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    Ok((chain, signing_key))
+}
+
+impl ResolvesClientCert for ClientCertResolver {
+    fn resolve(
+        &self,
+        _acceptable_issuers: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        println!("Server sig schemes: {:#?}", sigschemes);
+        let (chain, signing_key) = get_chain(&self.0, &self.1).ok()?;
+        for scheme in signing_key.supported_schemes() {
+            if sigschemes.contains(scheme) {
+                return Some(Arc::new(CertifiedKey {
+                    cert: chain,
+                    key: Arc::new(signing_key),
+                    ocsp: None,
+                    sct_list: None,
+                }));
+            }
+        }
+        None
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+fn make_capi_with_cng_config() -> Arc<rustls::ClientConfig> {
+    println!("in make_capi_with_cng_config");
+
+    let store = CertStore::open(CertStoreType::LocalMachine, "my").unwrap();
+
+    let config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(verifier_for_platform())
+        .with_client_cert_resolver(Arc::new(ClientCertResolver(
+            store,
+//            "BadSSL".to_string(),
+            "eccplayclient".to_string(),
+        )));
+
+    Arc::new(config)
+}
+
 /// Parse some arguments, then make a TLS client connection
 /// somewhere.
 fn main() {
@@ -337,13 +409,20 @@ fn main() {
 
     // VARIABLES FOR THE RUN:
     let ca_file = String::from("root.pem");
-    let addr = lookup_ipv4("microsoft.com", 443);
+//    let addr = lookup_ipv4("microsoft.com", 443);
+//    let addr = lookup_ipv4("client.badssl.com", 443);
+    let addr = lookup_ipv4("prod.idrix.eu", 443);
+//    let addr = lookup_ipv4("server.cryptomix.com", 443);
 
-    let config:Arc<ClientConfig> = make_config(ca_file);
+//    let config:Arc<ClientConfig> = make_config(ca_file);
 
-    let server_name = "microsoft.com".try_into().unwrap();
+//    let server_name = "microsoft.com".try_into().unwrap();
+//    let server_name = "client.badssl.com".try_into().unwrap();
+     let server_name = "prod.idrix.eu".try_into().unwrap();
+//    let server_name = "server.cryptomix.com".try_into().unwrap();
     let mut sock = TcpStream::connect(addr).unwrap();
-    let new_config = make_capi_config();
+//    let new_config = make_capi_config();
+    let new_config = make_capi_with_cng_config();
 
     let mut tlsclient = TlsClient::new(sock, server_name, new_config);
 
