@@ -24,6 +24,7 @@ use rustls::{
 use rustls_cng::{
     signer::CngSigningKey,
     store::{CertStore, CertStoreType},
+    cert::{CertChainEngineType, CertAiaRetrievalType},
 };
 
 /// This encapsulates the TCP-level connection, some connection
@@ -341,9 +342,18 @@ pub struct ClientCertResolver(CertStore, String);
 
 fn get_chain(store: &CertStore, name: &str) -> anyhow::Result<(Vec<Certificate>, CngSigningKey)> {
     let contexts = store.find_by_subject_str(name)?;
-    let context = contexts
-        .first()
-        .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
+//    let context = contexts
+//        .first()
+//        .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
+
+    let context = contexts.into_iter().find_map(|ctx| {
+        if ctx.has_private_key() {
+            return Some(ctx);
+        }
+
+        None
+    }).ok_or_else(|| anyhow::Error::msg("No client cert"))?;
+
     let key = context.acquire_key()?;
     let signing_key = CngSigningKey::new(key)?;
     let chain = context
@@ -380,6 +390,138 @@ impl ResolvesClientCert for ClientCertResolver {
     }
 }
 
+pub struct ClientCertResolverForServerIssuer(CertStore);
+impl ResolvesClientCert for ClientCertResolverForServerIssuer {
+    fn resolve(
+        &self,
+        acceptable_issuers: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        let context = self.0.find_client_cert(acceptable_issuers).ok()?;
+
+        let key = context.acquire_key().ok()?;
+        let signing_key = CngSigningKey::new(key).ok()?;
+
+        println!("Key alg group: {:?}", signing_key.key().algorithm_group());
+        println!("Key alg: {:?}", signing_key.key().algorithm());
+
+        // attempt to acquire a full certificate chain
+        let chain_engine_type;
+        if self.0.is_local_machine() {
+            chain_engine_type = CertChainEngineType::LocalMachine;
+        } else {
+            chain_engine_type = CertChainEngineType::CurrentUser;
+        }
+
+        let chain = context.as_chain_der_ex(
+                        chain_engine_type,
+                        CertAiaRetrievalType::CacheOnly,
+                        false,                              // include_root
+                        Some(self.0.clone())
+                     ).ok()?;
+        let certs = chain.into_iter().map(Certificate).collect();
+
+        println!("Server sig schemes: {:#?}", sigschemes);
+        for scheme in signing_key.supported_schemes() {
+            if sigschemes.contains(scheme) {
+                return Some(Arc::new(CertifiedKey {
+                    cert: certs,
+                    key: Arc::new(signing_key),
+                    ocsp: None,
+                    sct_list: None,
+                }));
+            }
+        }
+        None
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+fn make_dynamic_cng_config(store_type: CertStoreType, store_name: &str) -> Arc<rustls::ClientConfig> {
+    println!("in make_dynamic_cng_config");
+
+    let store = CertStore::open(store_type, store_name).unwrap();
+    store.set_auto_resync().unwrap();
+
+    let config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(verifier_for_platform())
+        .with_client_cert_resolver(Arc::new(ClientCertResolverForServerIssuer(
+            store
+        )));
+
+    Arc::new(config)
+}
+
+pub struct CacheClientCertResolver(Arc<CertifiedKey>);
+impl ResolvesClientCert for CacheClientCertResolver {
+    fn resolve(
+        &self,
+        _acceptable_issuers: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        println!("in resolve for CacheClientCertResolver");
+
+        let signing_key = &self.0.key;
+        println!("Key alg: {:?}", signing_key.algorithm());
+
+        println!("Server sig schemes: {:#?}", sigschemes);
+        if signing_key.choose_scheme(sigschemes).is_some() {
+            return Some(Arc::clone(&self.0));
+        } 
+
+        None
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+fn make_thumbprint_cng_config(store_type: CertStoreType, store_name: &str,
+                              hex_thumbprint: &str) -> Arc<rustls::ClientConfig> {
+    println!("in make_thumbprint_cng");
+
+
+    let store = CertStore::open_for_sha1_find(store_type, store_name).unwrap();
+    let thumbprint = hex::decode(hex_thumbprint).unwrap();
+    let context = store.find_last_renewed(&thumbprint).unwrap();
+
+    let key = context.acquire_key().unwrap();
+    let signing_key = CngSigningKey::new(key).unwrap();
+
+    let chain_engine_type = match store_type {
+        CertStoreType::LocalMachine => CertChainEngineType::LocalMachine,
+        _ => CertChainEngineType::CurrentUser,
+    };
+
+    let chain = context
+        .as_chain_der_ex(
+            chain_engine_type,
+            CertAiaRetrievalType::Network,
+            false,              // include_root
+            None).unwrap()      // additional_store
+        .into_iter()
+        .map(Certificate)
+        .collect();
+
+    let config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(verifier_for_platform())
+        .with_client_cert_resolver(Arc::new(CacheClientCertResolver(
+            Arc::new(CertifiedKey {
+                cert: chain,
+                key: Arc::new(signing_key),
+                ocsp: None,
+                sct_list: None,
+            }))));
+
+    Arc::new(config)
+}
+
 fn make_capi_with_cng_config() -> Arc<rustls::ClientConfig> {
     println!("in make_capi_with_cng_config");
 
@@ -411,19 +553,31 @@ fn main() {
     let ca_file = String::from("root.pem");
 //    let addr = lookup_ipv4("microsoft.com", 443);
 //    let addr = lookup_ipv4("client.badssl.com", 443);
-    let addr = lookup_ipv4("prod.idrix.eu", 443);
+//    let addr = lookup_ipv4("prod.idrix.eu", 443);
 //    let addr = lookup_ipv4("server.cryptomix.com", 443);
 
 //    let config:Arc<ClientConfig> = make_config(ca_file);
 
 //    let server_name = "microsoft.com".try_into().unwrap();
 //    let server_name = "client.badssl.com".try_into().unwrap();
-     let server_name = "prod.idrix.eu".try_into().unwrap();
+//    let server_name = "prod.idrix.eu".try_into().unwrap();
 //    let server_name = "server.cryptomix.com".try_into().unwrap();
-    let mut sock = TcpStream::connect(addr).unwrap();
 //    let new_config = make_capi_config();
-    let new_config = make_capi_with_cng_config();
+//    let new_config = make_capi_with_cng_config();
 
+
+    let addr = lookup_ipv4("client.badssl.com", 443);
+    let server_name = "client.badssl.com".try_into().unwrap();
+//    let new_config = make_dynamic_cng_config(CertStoreType::LocalMachine, "play");
+
+    // For BadSSL Client Certificate
+//    let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
+//        "d69226ae7828175958fa553c73a92e462a96f783");
+
+    // For eccplayclient
+    let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
+        "c1737220b3054d83c70228b0beb301deb032992e");
+    let mut sock = TcpStream::connect(addr).unwrap();
     let mut tlsclient = TlsClient::new(sock, server_name, new_config);
 
 
