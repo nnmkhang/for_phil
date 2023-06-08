@@ -322,7 +322,6 @@ fn make_config(ca_file: String) -> Arc<rustls::ClientConfig> {
 
 
     config.key_log = Arc::new(rustls::KeyLogFile::new());
-    config.enable_tickets = false;
     config.enable_sni = false;
 
    // config.
@@ -566,8 +565,8 @@ fn main() {
 //    let new_config = make_capi_with_cng_config();
 
 
-    let addr = lookup_ipv4("client.badssl.com", 443);
-    let server_name = "client.badssl.com".try_into().unwrap();
+//    let addr = lookup_ipv4("client.badssl.com", 443);
+//    let server_name = "client.badssl.com".try_into().unwrap();
 //    let new_config = make_dynamic_cng_config(CertStoreType::LocalMachine, "play");
 
     // For BadSSL Client Certificate
@@ -575,6 +574,8 @@ fn main() {
 //        "d69226ae7828175958fa553c73a92e462a96f783");
 
     // For eccplayclient
+    let addr = lookup_ipv4("prod.idrix.eu", 443);
+    let server_name = "prod.idrix.eu".try_into().unwrap();
     let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
         "c1737220b3054d83c70228b0beb301deb032992e");
     let mut sock = TcpStream::connect(addr).unwrap();
