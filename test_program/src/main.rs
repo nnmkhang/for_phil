@@ -212,186 +212,24 @@ fn lookup_ipv4(host: &str, port: u16) -> SocketAddr {
 
 
 
-fn load_certs(filename: &str) -> Vec<rustls::Certificate> {
-    let certfile = fs::File::open(filename).expect("cannot open certificate file");
-    let mut reader = BufReader::new(certfile);
-    rustls_pemfile::certs(&mut reader)
-        .unwrap()
-        .iter()
-        .map(|v| rustls::Certificate(v.clone()))
-        .collect()
-}
-
-fn load_private_key(filename: &str) -> rustls::PrivateKey {
-    let keyfile = fs::File::open(filename).expect("cannot open private key file");
-    let mut reader = BufReader::new(keyfile);
-
-    loop {
-        match rustls_pemfile::read_one(&mut reader).expect("cannot parse private key .pem file") {
-            Some(rustls_pemfile::Item::RSAKey(key)) => return rustls::PrivateKey(key),
-            Some(rustls_pemfile::Item::PKCS8Key(key)) => return rustls::PrivateKey(key),
-            Some(rustls_pemfile::Item::ECKey(key)) => return rustls::PrivateKey(key),
-            None => break,
-            _ => {}
-        }
-    }
-
-    panic!(
-        "no keys found in {:?} (encrypted keys not supported)",
-        filename
-    );
-}
-
-#[cfg(feature = "dangerous_configuration")]
-mod danger {
-    pub struct NoCertificateVerification {}
-
-    impl rustls::client::ServerCertVerifier for NoCertificateVerification {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &rustls::Certificate,
-            _intermediates: &[rustls::Certificate],
-            _server_name: &rustls::ServerName,
-            _scts: &mut dyn Iterator<Item = &[u8]>,
-            _ocsp: &[u8],
-            _now: std::time::SystemTime,
-        ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-            Ok(rustls::client::ServerCertVerified::assertion())
-        }
-    }
-}
-
-#[cfg(feature = "dangerous_configuration")]
-fn apply_dangerous_options(args: &Args, cfg: &mut rustls::ClientConfig) {
-    if args.flag_insecure {
-        cfg.dangerous()
-            .set_certificate_verifier(Arc::new(danger::NoCertificateVerification {}));
-    }
-}
-
-// #[cfg(not(feature = "dangerous_configuration"))]
-// fn apply_dangerous_options(args: &Args, _: &mut rustls::ClientConfig) {
-//     if args.flag_insecure {
-//         panic!("This build does not support --insecure.");
-//     }
-// }
-
-/// Build a `ClientConfig` from our arguments
-fn make_config(ca_file: String) -> Arc<rustls::ClientConfig> {
-    let mut root_store = RootCertStore::empty();
-
-    let certfile = fs::File::open(ca_file).expect("Cannot open CA file");
-    let mut reader = BufReader::new(certfile);
-    let num_roots = root_store.add_parsable_certificates(&rustls_pemfile::certs(&mut reader).unwrap());
-    //root_store.add(ca_);
-    println!("{:?}",num_roots);
-    println!("{:?}",reader.buffer());
-
-    let suites = rustls::DEFAULT_CIPHER_SUITES.to_vec();
-    let versions = rustls::DEFAULT_VERSIONS.to_vec();
-
-    let config = rustls::ClientConfig::builder()
-        .with_cipher_suites(&suites)
-        .with_safe_default_kx_groups()
-        .with_protocol_versions(&versions)
-        .expect("inconsistent cipher-suite/versions selected")
-        .with_root_certificates(root_store);
-
-    let flag_auth_key = None;
-    let flag_auth_certs = None;
-
-    // !!!!!!! THIS PART IS FOR CLIENT AUTH, HAVE TO ENABLE FOR CLIENT AUTH I THE FUTURE 
-    let mut config = match (flag_auth_key, flag_auth_certs) {
-        (Some(key_file), Some(certs_file)) => {
-            println!("in client auth");
-            let certs = load_certs(certs_file);
-            let key = load_private_key(key_file);
-            config
-                .with_single_cert(certs, key)
-                .expect("invalid client auth certs/key")
-        }
-        (None, None) =>
-        { 
-            println!("in no client auth");
-            config.with_no_client_auth()
-            
-        },
-        (_, _) => {
-            panic!("must provide --auth-certs and --auth-key together");
-        }
-    };
-
-
-    config.key_log = Arc::new(rustls::KeyLogFile::new());
-    config.enable_sni = false;
-
-   // config.
-    //apply_dangerous_options(args, &mut config);
-
-    Arc::new(config)
-}
-
-
+// Use rustls-platform-verifier to verify server certificate
+// No client certificates
 fn make_capi_config() -> Arc<rustls::ClientConfig> {
     let config = tls_config();
     Arc::new(config)
 }
 
 
-pub struct ClientCertResolver(CertStore, String);
 
-fn get_chain(store: &CertStore, name: &str) -> anyhow::Result<(Vec<Certificate>, CngSigningKey)> {
-    let contexts = store.find_by_subject_str(name)?;
-//    let context = contexts
-//        .first()
-//        .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
-
-    let context = contexts.into_iter().find_map(|ctx| {
-        if ctx.has_private_key() {
-            return Some(ctx);
-        }
-
-        None
-    }).ok_or_else(|| anyhow::Error::msg("No client cert"))?;
-
-    let key = context.acquire_key()?;
-    let signing_key = CngSigningKey::new(key)?;
-    let chain = context
-        .as_chain_der()?
-        .into_iter()
-        .map(Certificate)
-        .collect();
-    Ok((chain, signing_key))
-}
-
-impl ResolvesClientCert for ClientCertResolver {
-    fn resolve(
-        &self,
-        _acceptable_issuers: &[&[u8]],
-        sigschemes: &[SignatureScheme],
-    ) -> Option<Arc<CertifiedKey>> {
-        println!("Server sig schemes: {:#?}", sigschemes);
-        let (chain, signing_key) = get_chain(&self.0, &self.1).ok()?;
-        for scheme in signing_key.supported_schemes() {
-            if sigschemes.contains(scheme) {
-                return Some(Arc::new(CertifiedKey {
-                    cert: chain,
-                    key: Arc::new(signing_key),
-                    ocsp: None,
-                    sct_list: None,
-                }));
-            }
-        }
-        None
-    }
-
-    fn has_certs(&self) -> bool {
-        true
-    }
-}
-
-pub struct ClientCertResolverForServerIssuer(CertStore);
-impl ResolvesClientCert for ClientCertResolverForServerIssuer {
+// Resolver for make_issuer_name_list_cng_config
+//
+// The certificate and key are found and created dynamically for each
+// TLS connection.
+//
+// Since the certificate chain is built during the connection only allow
+// CacheOnly AIA retrieval.
+pub struct ClientCertResolverForIssuerNameList(CertStore);
+impl ResolvesClientCert for ClientCertResolverForIssuerNameList {
     fn resolve(
         &self,
         acceptable_issuers: &[&[u8]],
@@ -438,8 +276,21 @@ impl ResolvesClientCert for ClientCertResolverForServerIssuer {
     }
 }
 
-fn make_dynamic_cng_config(store_type: CertStoreType, store_name: &str) -> Arc<rustls::ClientConfig> {
-    println!("in make_dynamic_cng_config");
+// Use rustls-platform-verifier to verify server certificate
+//
+// Use rustls-cng to provide the client cert via the server's provided
+// Issuer Name List
+
+// Note, the rustls-platform-verifier crate MUST BE UPDATED to include the following:
+//  In src\lib.rs add the following after pub fn tls_config()
+
+//  /// Exposed so application can provide a client_cert_resolver
+//  pub fn verifier_for_platform() -> Arc<dyn rustls::client::ServerCertVerifier> {
+//      Arc::new(Verifier::new())
+//  }
+
+fn make_issuer_name_list_cng_config(store_type: CertStoreType, store_name: &str) -> Arc<rustls::ClientConfig> {
+    println!("in make_issuer_name_list_cng_config");
 
     let store = CertStore::open(store_type, store_name).unwrap();
     store.set_auto_resync().unwrap();
@@ -447,13 +298,18 @@ fn make_dynamic_cng_config(store_type: CertStoreType, store_name: &str) -> Arc<r
     let config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_custom_certificate_verifier(verifier_for_platform())
-        .with_client_cert_resolver(Arc::new(ClientCertResolverForServerIssuer(
+        .with_client_cert_resolver(Arc::new(ClientCertResolverForIssuerNameList(
             store
         )));
 
     Arc::new(config)
 }
 
+// Resolver for:
+//   make_issuer_name_list_cng_config
+//   make_by_name_cng_config
+//
+// The certificate and key were found and created during make config
 pub struct CacheClientCertResolver(Arc<CertifiedKey>);
 impl ResolvesClientCert for CacheClientCertResolver {
     fn resolve(
@@ -478,6 +334,17 @@ impl ResolvesClientCert for CacheClientCertResolver {
         true
     }
 }
+
+// Use rustls-platform-verifier to verify server certificate
+//
+// See above for how the rustls-platform-verifier crate MUST BE UPDATED.
+//
+// Use rustls-cng to provide the client cert by finding by sha1 or
+// sha1+sha256 thumbprint. Chases down renewed certificates via the
+// CERT_RENEWAL_PROP_ID property.
+//
+// Since the certificate chain is built during make config we can do
+// Network AIA retrieval.
 
 fn make_thumbprint_cng_config(store_type: CertStoreType, store_name: &str,
                               hex_thumbprint: &str) -> Arc<rustls::ClientConfig> {
@@ -520,22 +387,62 @@ fn make_thumbprint_cng_config(store_type: CertStoreType, store_name: &str,
     Arc::new(config)
 }
 
-fn make_capi_with_cng_config() -> Arc<rustls::ClientConfig> {
-    println!("in make_capi_with_cng_config");
+// Use rustls-platform-verifier to verify server certificate
+//
+// See above for how the rustls-platform-verifier crate MUST BE UPDATED.
+//
+// Use rustls-cng to provide the client cert by finding by subject name substring
+//
+// Since the certificate chain is built during make config we can do
+// Network AIA retrieval.
+fn make_by_name_cng_config(store_type: CertStoreType, store_name: &str,
+                              name: &str) -> Arc<rustls::ClientConfig> {
+    println!("in make_by_namethumbprint_cng");
 
-    let store = CertStore::open(CertStoreType::LocalMachine, "my").unwrap();
+
+    let store = CertStore::open(store_type, store_name).unwrap();
+    let contexts = store.find_by_subject_str(name).unwrap();
+//    let contexts = store.find_by_issuer_str(name).unwrap();
+    let context = contexts.into_iter().find_map(|ctx| {
+        if ctx.has_private_key() && ctx.is_time_valid() {
+            return Some(ctx);
+        }
+
+        None
+    }).unwrap();
+
+    let key = context.acquire_key().unwrap();
+    let signing_key = CngSigningKey::new(key).unwrap();
+
+    let chain_engine_type = match store_type {
+        CertStoreType::LocalMachine => CertChainEngineType::LocalMachine,
+        _ => CertChainEngineType::CurrentUser,
+    };
+
+    let chain = context
+        .as_chain_der_ex(
+            chain_engine_type,
+            CertAiaRetrievalType::Network,
+            false,              // include_root
+            Some(store)).unwrap()      // additional_store
+        .into_iter()
+        .map(Certificate)
+        .collect();
 
     let config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_custom_certificate_verifier(verifier_for_platform())
-        .with_client_cert_resolver(Arc::new(ClientCertResolver(
-            store,
-//            "BadSSL".to_string(),
-            "eccplayclient".to_string(),
-        )));
+        .with_client_cert_resolver(Arc::new(CacheClientCertResolver(
+            Arc::new(CertifiedKey {
+                cert: chain,
+                key: Arc::new(signing_key),
+                ocsp: None,
+                sct_list: None,
+            }))));
 
     Arc::new(config)
 }
+
 
 /// Parse some arguments, then make a TLS client connection
 /// somewhere.
@@ -554,29 +461,31 @@ fn main() {
 //    let addr = lookup_ipv4("prod.idrix.eu", 443);
 //    let addr = lookup_ipv4("server.cryptomix.com", 443);
 
-//    let config:Arc<ClientConfig> = make_config(ca_file);
-
 //    let server_name = "microsoft.com".try_into().unwrap();
 //    let server_name = "client.badssl.com".try_into().unwrap();
 //    let server_name = "prod.idrix.eu".try_into().unwrap();
 //    let server_name = "server.cryptomix.com".try_into().unwrap();
 //    let new_config = make_capi_config();
-//    let new_config = make_capi_with_cng_config();
 
 
 //    let addr = lookup_ipv4("client.badssl.com", 443);
 //    let server_name = "client.badssl.com".try_into().unwrap();
-//    let new_config = make_dynamic_cng_config(CertStoreType::LocalMachine, "play");
+    let new_config = make_issuer_name_list_cng_config(CertStoreType::LocalMachine, "play");
 
     // For BadSSL Client Certificate
 //    let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
 //        "d69226ae7828175958fa553c73a92e462a96f783");
+
 
     // For eccplayclient
     let addr = lookup_ipv4("prod.idrix.eu", 443);
     let server_name = "prod.idrix.eu".try_into().unwrap();
     let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
         "c1737220b3054d83c70228b0beb301deb032992e");
+
+    let new_config = make_by_name_cng_config(CertStoreType::LocalMachine, "play",
+        "eccplayclient");
+
     let mut sock = TcpStream::connect(addr).unwrap();
     let mut tlsclient = TlsClient::new(sock, server_name, new_config);
 
