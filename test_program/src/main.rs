@@ -18,6 +18,7 @@ const CLIENT: mio::Token = mio::Token(0);
 
 use rustls::{
     client::ResolvesClientCert, sign::CertifiedKey, Certificate, ClientConfig, ClientConnection,
+    sign::SigningKey,
     SignatureScheme, Stream,
 };
 
@@ -421,15 +422,13 @@ impl ResolvesClientCert for ClientCertResolverForServerIssuer {
         let certs = chain.into_iter().map(Certificate).collect();
 
         println!("Server sig schemes: {:#?}", sigschemes);
-        for scheme in signing_key.supported_schemes() {
-            if sigschemes.contains(scheme) {
-                return Some(Arc::new(CertifiedKey {
-                    cert: certs,
-                    key: Arc::new(signing_key),
-                    ocsp: None,
-                    sct_list: None,
-                }));
-            }
+        if signing_key.choose_scheme(sigschemes).is_some() {
+            return Some(Arc::new(CertifiedKey {
+                cert: certs,
+                key: Arc::new(signing_key),
+                ocsp: None,
+                sct_list: None,
+            }));
         }
         None
     }

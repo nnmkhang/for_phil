@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 rustls-platform-verifier = {version = "0.1", path = "D:\\khang_rustls-platform-verifier"}
-rustls-cng = {version = "0.3", path = "D:\\rustls-cng"}
+rustls-cng = {version = "0.3", path = "D:\\khang_rustls-cng"}
 rustls = { version = "0.21", features = ["dangerous_configuration", "tls12", "logging"] }
 docopt = "~1.1"
 env_logger = "0.9.0" # 0.10 requires an MSRV bump to 1.60
