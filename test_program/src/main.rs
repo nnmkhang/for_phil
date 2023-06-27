@@ -465,12 +465,11 @@ fn main() {
 //    let server_name = "client.badssl.com".try_into().unwrap();
 //    let server_name = "prod.idrix.eu".try_into().unwrap();
 //    let server_name = "server.cryptomix.com".try_into().unwrap();
-//    let new_config = make_capi_config();
 
 
 //    let addr = lookup_ipv4("client.badssl.com", 443);
 //    let server_name = "client.badssl.com".try_into().unwrap();
-    let new_config = make_issuer_name_list_cng_config(CertStoreType::LocalMachine, "play");
+//    let new_config = make_issuer_name_list_cng_config(CertStoreType::LocalMachine, "play");
 
     // For BadSSL Client Certificate
 //    let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
@@ -478,13 +477,17 @@ fn main() {
 
 
     // For eccplayclient
-    let addr = lookup_ipv4("prod.idrix.eu", 443);
-    let server_name = "prod.idrix.eu".try_into().unwrap();
-    let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
-        "c1737220b3054d83c70228b0beb301deb032992e");
+//    let addr = lookup_ipv4("prod.idrix.eu", 443);
+//    let server_name = "prod.idrix.eu".try_into().unwrap();
+//   let new_config = make_thumbprint_cng_config(CertStoreType::LocalMachine, "play",
+//        "c1737220b3054d83c70228b0beb301deb032992e");
 
-    let new_config = make_by_name_cng_config(CertStoreType::LocalMachine, "play",
-        "eccplayclient");
+//    let new_config = make_by_name_cng_config(CertStoreType::LocalMachine, "play",
+//        "eccplayclient");
+
+    let new_config = make_capi_config();
+    let server_name = "mozilla-modern.badssl.com".try_into().unwrap();
+    let addr = lookup_ipv4("mozilla-modern.badssl.com", 443);
 
     let mut sock = TcpStream::connect(addr).unwrap();
     let mut tlsclient = TlsClient::new(sock, server_name, new_config);
